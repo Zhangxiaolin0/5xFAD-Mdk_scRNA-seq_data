@@ -323,7 +323,7 @@ write.csv(GO.CB.F.Inhibitory.degs_up,
           row.names = FALSE)
 
 # ===== 16. Visualize GO enrichment results =====
-# Biological Process terms for up-regulated genes
+# Excitatory neuron
 Excitatory_BP_to_plot <- readxl::read_xlsx('Excitatory_BP_to_plot.xlsx')
 ggplot(data=Excitatory_BP_to_plot, aes(y=sort(Description), x=Count)) +
   geom_point(aes(color=-log10(pvalue),size=Count),alpha=1)+
@@ -339,7 +339,7 @@ ggplot(data=Excitatory_BP_to_plot, aes(y=sort(Description), x=Count)) +
   theme(text=element_text(family="serif"))+
   labs(title = "Excitatory neuron: 5xFAD; Mdk-/- vs. 5xFAD (female)")
 
-
+# Inhibitory neuron
 Inhibitory_BP_to_plot <- readxl::read_xlsx('Inhibitory_BP_to_plot.xlsx')
 ggplot(data=Inhibitory_BP_to_plot, aes(y=sort(Description), x=Count)) +
   geom_point(aes(color=-log10(pvalue),size=Count),alpha=1)+
