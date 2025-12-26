@@ -1,0 +1,360 @@
+library(Seurat)
+library(SeuratData)
+library(dplyr)
+library(data.table)
+library(SummarizedExperiment)
+library(ggplot2)
+library(ggpubr)
+library(rstatix)
+library(reshape2)
+library(clusterProfiler)
+
+# ===== 1. Load data and create Seurat objects =====
+data.FAD.BF <- Read10X("/Users/zhangxiaolin/Desktop/DATA/MDK x FAD/Brain snRNA-seq/raw data/BF")
+data.FAD.MDK.CF <- Read10X("/Users/zhangxiaolin/Desktop/DATA/MDK x FAD/Brain snRNA-seq/raw data/CF")
+data.FAD.BM <- Read10X("/Users/zhangxiaolin/Desktop/DATA/MDK x FAD/Brain snRNA-seq/raw data/BM")
+data.FAD.MDK.CM <- Read10X("/Users/zhangxiaolin/Desktop/DATA/MDK x FAD/Brain snRNA-seq/raw data/CM")
+
+data.FAD.BF <- CreateSeuratObject(counts = data.FAD.BF, project = "BF FAD", min.cells = 3, min.features = 200)
+data.FAD.MDK.CF <- CreateSeuratObject(counts = data.FAD.MDK.CF, project = "CF FAD.MDK", min.cells = 3, min.features = 200)
+data.FAD.BM <- CreateSeuratObject(counts = data.FAD.BM, project = "BM FAD", min.cells = 3, min.features = 200)
+data.FAD.MDK.CM <- CreateSeuratObject(counts = data.FAD.MDK.CM, project = "CM FAD.MDK", min.cells = 3, min.features = 200)
+
+data.FAD.BF@meta.data$Sample <- "BF 5xFAD"
+data.FAD.MDK.CF@meta.data$Sample <- "CF FAD.MDK"
+data.FAD.BM@meta.data$Sample <- "BM 5xFAD"
+data.FAD.MDK.CM@meta.data$Sample <- "CM FAD.MDK"
+
+# ===== 2. Merge datasets =====
+data.FAD.MDK.brain <- merge(x = data.FAD.BF, y = data.FAD.MDK.CF)
+data.FAD.MDK.brain <- merge(x = data.FAD.MDK.brain, y = data.FAD.BM)
+data.FAD.MDK.brain <- merge(x = data.FAD.MDK.brain, y = data.FAD.MDK.CM)
+
+# ===== 3. Quality control =====
+data.FAD.MDK.brain[["percent.mt"]] <- PercentageFeatureSet(data.FAD.MDK.brain, pattern = "^mt-")
+data.FAD.MDK.brain[["percent.hb"]] <- PercentageFeatureSet(data.FAD.MDK.brain, pattern = "^Hbb-")
+
+# Visualize QC metrics
+VlnPlot(data.FAD.MDK.brain, features = c("nFeature_RNA", "nCount_RNA"), ncol = 2, pt.size = 0)
+FeatureScatter(data.FAD.MDK.brain, feature1 = "nCount_RNA", feature2 = "nFeature_RNA")
+
+# Check quantiles for filtering thresholds
+quantile(data.FAD.MDK.brain$nFeature_RNA, c(0.05, 0.95))
+quantile(data.FAD.MDK.brain$nCount_RNA, c(0.05, 0.95))
+
+# QC filtering
+data.FAD.MDK.brain.qc <- subset(data.FAD.MDK.brain, subset = nFeature_RNA > 552 & nFeature_RNA < 3849
+                                & nCount_RNA > 761 & nCount_RNA < 13738 & percent.mt < 10)
+
+# ===== 4. Normalization, PCA and integration =====
+data.FAD.MDK.brain.qc <- NormalizeData(data.FAD.MDK.brain.qc)
+data.FAD.MDK.brain.qc <- FindVariableFeatures(data.FAD.MDK.brain.qc)
+data.FAD.MDK.brain.qc <- ScaleData(data.FAD.MDK.brain.qc)
+data.FAD.MDK.brain.qc <- RunPCA(data.FAD.MDK.brain.qc)
+
+data.FAD.MDK.brain.integrated <- IntegrateLayers(
+  object = data.FAD.MDK.brain.qc, method = CCAIntegration,
+  orig.reduction = "pca", new.reduction = "integrated.cca",
+  verbose = FALSE)
+
+# ===== 5. Clustering and UMAP =====
+data.FAD.MDK.brain.integrated <- FindNeighbors(data.FAD.MDK.brain.integrated, 
+                                               reduction = "integrated.cca", dims = 1:30)
+data.FAD.MDK.brain.integrated <- FindClusters(data.FAD.MDK.brain.integrated, 
+                                              resolution = 0.25, cluster.name = "cca_clusters")
+data.FAD.MDK.brain.integrated <- RunUMAP(data.FAD.MDK.brain.integrated, 
+                                         reduction = "integrated.cca", dims = 1:30,
+                                         reduction.name = "umap.cca")
+
+# Visualize UMAP by sample
+Idents(data.FAD.MDK.brain.integrated) <- data.FAD.MDK.brain.integrated$Sample
+DimPlot(object = data.FAD.MDK.brain.integrated, pt.size = 1, reduction = 'umap.cca', label.size = 15,
+        split.by = "Sample", cols = c('#006a8e', "#b1283a", '#A2CD5A', "#BF3EFF"))
+
+# ===== 6. Find marker genes =====
+DefaultAssay(data.FAD.MDK.brain.integrated) <- "RNA"
+Idents(data.FAD.MDK.brain.integrated) <- data.FAD.MDK.brain.integrated$cca_clusters
+FAD.MDK.brain.cluster.markers <- FindAllMarkers(data.FAD.MDK.brain.integrated, only.pos = TRUE, 
+                                                min.pct = 0.25, logfc.threshold = 0.25)
+
+# ===== 7. Visualize marker genes =====
+# Excitatory neuron markers
+FeaturePlot(data.FAD.MDK.brain.integrated, features = c("Slc17a7", "Satb2"), label = T,
+            reduction = 'umap.cca', cols = c("lightgrey", "red"), min.cutoff = 0)
+
+# Inhibitory neuron markers
+FeaturePlot(data.FAD.MDK.brain.integrated, features = c("Gad1", "Gad2"), label = F, pt.size = 1,
+            reduction = 'umap.cca', cols = c("lightgrey", "red"), min.cutoff = 0)
+
+# Astrocyte markers
+FeaturePlot(data.FAD.MDK.brain.integrated, features = c("Gfap", "Aqp4"), label = T,
+            reduction = 'umap.cca', cols = c("lightgrey", "red"), min.cutoff = 0)
+
+# Oligodendrocyte markers
+FeaturePlot(data.FAD.MDK.brain.integrated, features = c("Mobp", "Mbp", "Mog"), label = T,
+            reduction = 'umap.cca', cols = c("lightgrey", "red"), min.cutoff = 0)
+
+# ===== 8. Cell type annotation =====
+Idents(data.FAD.MDK.brain.integrated) <- data.FAD.MDK.brain.integrated$cca_clusters
+data.FAD.MDK.brain.integrated <- RenameIdents(data.FAD.MDK.brain.integrated,   
+                                              '0' = "Inhibitory neuron", '1' = "Inhibitory neuron",
+                                              '2' = "Excitatory neuron", '3' = "Excitatory neuron",
+                                              '4' = "Excitatory neuron", '5' = "Inhibitory neuron", 
+                                              '6' = "Inhibitory neuron", '7' = "Excitatory neuron", 
+                                              '8' = "Excitatory neuron", '9' = "Oligodendrocyte",
+                                              '10' = "Excitatory neuron", '11' = "Excitatory neuron",
+                                              '12' = 'Astrocyte', '13' = 'Excitatory neuron', 
+                                              '14' = 'Excitatory neuron', '15' = 'Excitatory neuron', 
+                                              '16' = "Inhibitory neuron", '17' = "Excitatory neuron",
+                                              '18' = 'Excitatory neuron', '19' = "Inhibitory neuron", 
+                                              '20' = "Inhibitory neuron")
+
+data.FAD.MDK.brain.integrated$celltype <- Idents(data.FAD.MDK.brain.integrated)
+
+# Visualize cell types
+my.color <- c("#CC79A7", "#55967e", "#006a8e", "#e3632d", "#E39E3E", "#D55E00",
+              "#bbbbbb", "#4F86C6", "#fdc23e", '#fe3632')
+DimPlot(object = data.FAD.MDK.brain.integrated, cols = my.color, pt.size = 0.05, label = TRUE, 
+        reduction = "umap.cca", label.size = 4, repel = TRUE)
+
+# ===== 9. Mdk expression visualization =====
+FeaturePlot(data.FAD.MDK.brain.integrated,
+            features = c("Mdk"),
+            split.by = "Sample",
+            ncol = 4,
+            order = TRUE,
+            min.cutoff = 0,
+            reduction = "umap.cca")
+
+# ===== 10. Cell type proportion analysis =====
+data.FAD.MDK.brain.list.1 <- SplitObject(object = data.FAD.MDK.brain.integrated, split.by = "Sample")
+FAD.BF.cellnum <- prop.table(table(data.FAD.MDK.brain.list.1$`BF 5xFAD`$celltype))
+FAD.MDK.CF.cellnum <- prop.table(table(data.FAD.MDK.brain.list.1$`CF FAD.MDK`$celltype))
+FAD.BM.cellnum <- prop.table(table(data.FAD.MDK.brain.list.1$`BM 5xFAD`$celltype))
+FAD.MDK.CM.cellnum <- prop.table(table(data.FAD.MDK.brain.list.1$`CM FAD.MDK`$celltype))
+
+cellnum.df <- merge(data.frame(FAD.BF.cellnum), data.frame(FAD.MDK.CF.cellnum), by = c('Var1'))
+cellnum.df <- merge(data.frame(cellnum.df), data.frame(FAD.BM.cellnum), by = c('Var1'))
+cellnum.df <- merge(data.frame(cellnum.df), data.frame(FAD.MDK.CM.cellnum), by = c('Var1'))
+
+cellnum.df <- cellnum.df[order(cellnum.df$Var1), ]
+names(cellnum.df) <- c("celltype", "BF FAD", "CF FAD.MDK", "BM FAD", "CM FAD.MDK")
+write.csv(cellnum.df, file = "cellnum.celltype(FAD.MDK.brain).csv", row.names = TRUE)
+
+# Convert to long format for plotting
+cellnum.df <- melt(cellnum.df, id.vars = 'celltype', variable.name = 'sample', value.name = 'proportion')
+
+# Set cell type order
+cell_order <- c("Excitatory neuron", "Inhibitory neuron", "Oligodendrocyte", "Astrocyte")
+cellnum.df$celltype <- factor(cellnum.df$celltype, levels = cell_order)
+
+# Plot stacked bar chart
+ggplot(data = cellnum.df, aes(x=sample, y=proportion, fill=celltype))+
+  geom_bar(stat = "identity", position = "stack")+
+  scale_fill_manual(values = c("Excitatory neuron" = "#D55E00",
+                               "Inhibitory neuron" = "#4F86C6",
+                               "Oligodendrocyte" = "#55967e",
+                               "Astrocyte" = "#CC79A7"))  +
+  theme_classic() +
+  theme(axis.title = element_text(size = 15),
+        axis.text.y = element_text(size=15, color = "black"),
+        axis.text.x = element_text(size = 15, color = "black", angle = 45, hjust=1, vjust=1),
+        axis.line = element_line(size = 0.5),
+        axis.ticks = element_line(size = 0.5),
+        text = element_text(size = 20, color = "black", family = "Arial"))
+
+# ===== 11. Define module scoring function =====
+analyze_module_score <- function(seurat_obj, gene_list, module_name, plot_title, 
+                                sex_type = c("female", "male")) {
+  sex_type <- match.arg(sex_type)
+  
+  # Add module score
+  seurat_obj <- AddModuleScore(seurat_obj, 
+                               features = list(gene_list),
+                               name = module_name)
+  
+  # Extract data
+  score_col <- paste0(module_name, "1")
+  stat_data <- FetchData(seurat_obj, vars = c(score_col, "celltype", "Sample"))
+  
+  # Rename groups based on sex
+  if (sex_type == "female") {
+    stat_data$Sample <- factor(stat_data$Sample, 
+                               levels = c("BF 5xFAD", "CF FAD.MDK"),
+                               labels = c("5xFAD", "5xFAD; Mdk-/-"))
+  } else {
+    stat_data$Sample <- factor(stat_data$Sample, 
+                               levels = c("BM 5xFAD", "CM FAD.MDK"),
+                               labels = c("5xFAD", "5xFAD; Mdk-/-"))
+  }
+  
+  # Statistical test
+  stat_results <- stat_data %>%
+    group_by(celltype) %>%
+    wilcox_test(as.formula(paste(score_col, "~ Sample"))) %>%
+    adjust_pvalue(method = "BH") %>%
+    add_significance("p.adj")
+  
+  print(paste("Statistical results for", module_name, "-", sex_type))
+  print(stat_results)
+  
+  # Set cell type order
+  stat_data$celltype <- factor(stat_data$celltype,
+                               levels = c("Excitatory neuron", "Inhibitory neuron"))
+  
+  # Plot
+  p <- ggplot(stat_data, aes(x = celltype, y = .data[[score_col]], fill = Sample)) +
+    geom_violin(trim = FALSE, alpha = 0.8, position = position_dodge(0.9)) +
+    geom_boxplot(width = 0.1, position = position_dodge(0.9), 
+                 outlier.shape = NA, alpha = 0.5) +
+    scale_fill_manual(values = c("5xFAD" = '#006a8e', "5xFAD; Mdk-/-" = "#b1283a")) +
+    stat_compare_means(aes(group = Sample), 
+                       method = "wilcox.test",
+                       label = "p.signif",
+                       label.y = 2.2,
+                       size = 10) +
+    theme_classic() +
+    labs(title = plot_title, x = "", y = "Score", fill = "") +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 12),
+          plot.title = element_text(hjust = 0.5, face = "bold", size = 14),
+          legend.position = "top")
+  
+  print(p)
+  
+  return(seurat_obj)
+}
+
+# ===== 12. Functional module scoring analysis (female) =====
+female_neurons <- subset(data.FAD.MDK.brain.integrated, subset = Sample %in% c("BF 5xFAD", "CF FAD.MDK"))
+Idents(female_neurons) <- female_neurons$celltype
+female_neurons <- subset(female_neurons, subset = celltype %in% c("Excitatory neuron", "Inhibitory neuron"))
+
+# Cognition module analysis
+cognition <- list(c('Adora2a', 'Grin2a', 'Grin2b', 'Grid2', 'Dlg4', 'Camk2a', 'Syn1', 'Syt1'))
+female_neurons <- analyze_module_score(female_neurons, cognition[[1]], 
+                                       "cognition", "Cognition (GO:0050890)", 
+                                       sex_type = "female")
+
+# Learning or memory module analysis
+learning_memory <- c('Brinp1', 'Ptn', 'Slc8a2', 'Tanc1', 'Cyp7b1', 'Itga8', 'Slc17a7', 'Atp1a2')
+female_neurons <- analyze_module_score(female_neurons, learning_memory, 
+                                       "learning_memory", "learning or memory (GO:0007611)", 
+                                       sex_type = "female")
+
+# ===== 13. Functional module scoring analysis (male) =====
+male_neurons <- subset(data.FAD.MDK.brain.integrated, subset = Sample %in% c("BM 5xFAD", "CM FAD.MDK"))
+Idents(male_neurons) <- male_neurons$celltype
+male_neurons <- subset(male_neurons, subset = celltype %in% c("Excitatory neuron", "Inhibitory neuron"))
+
+# Cognition module analysis
+male_neurons <- analyze_module_score(male_neurons, cognition[[1]], 
+                                     "cognition", "Cognition (GO:0050890)", 
+                                     sex_type = "male")
+
+# Learning or memory module analysis
+male_neurons <- analyze_module_score(male_neurons, learning_memory, 
+                                     "learning_memory", "learning or memory (GO:0007611)", 
+                                     sex_type = "male")
+
+# ===== 14. Differential gene expression analysis =====
+# Join layers once (avoid repeated calls)
+data.FAD.MDK.brain.integrated <- JoinLayers(data.FAD.MDK.brain.integrated)
+Idents(data.FAD.MDK.brain.integrated) <- data.FAD.MDK.brain.integrated$celltype
+
+# Inhibitory neuron DEGs
+Inhibitory <- subset(data.FAD.MDK.brain.integrated, ident = "Inhibitory neuron")
+Idents(Inhibitory) <- "Sample"
+CB.F.Inhibitory.degs <- FindMarkers(Inhibitory, ident.1 = "CF FAD.MDK", ident.2 = "BF 5xFAD", 
+                                    verbose = FALSE, test.use = "MAST", min.pct = 0.1)
+CB.F.Inhibitory.degs$change <- as.factor(ifelse(CB.F.Inhibitory.degs$p_val_adj < 0.05 & abs(CB.F.Inhibitory.degs$avg_log2FC) > 0.263,
+                                                ifelse(CB.F.Inhibitory.degs$avg_log2FC > 0.263, 'Up', 'Down'), 'Unsig'))
+CB.F.Inhibitory.degs$gene <- rownames(CB.F.Inhibitory.degs)
+
+# Excitatory neuron DEGs
+Excitatory <- subset(data.FAD.MDK.brain.integrated, ident = "Excitatory neuron")
+Idents(Excitatory) <- "Sample"
+CB.F.Excitatory.degs <- FindMarkers(Excitatory, ident.1 = "CF FAD.MDK", ident.2 = "BF 5xFAD", 
+                                    verbose = FALSE, test.use = "MAST", min.pct = 0.1)
+CB.F.Excitatory.degs$change <- as.factor(ifelse(CB.F.Excitatory.degs$p_val_adj < 0.05 & abs(CB.F.Excitatory.degs$avg_log2FC) > 0.263,
+                                                ifelse(CB.F.Excitatory.degs$avg_log2FC > 0.263, 'Up', 'Down'), 'Unsig'))
+CB.F.Excitatory.degs$gene <- rownames(CB.F.Excitatory.degs)
+
+# ===== 15. GO enrichment analysis =====
+# Up-regulated genes in Excitatory neurons
+CB.F.Excitatory.degs_up <- subset(CB.F.Excitatory.degs, 
+                                  CB.F.Excitatory.degs$avg_log2FC > 0.263 & CB.F.Excitatory.degs$p_val_adj < 0.05)
+transID.CB.F.Excitatory.degs_up <- bitr(CB.F.Excitatory.degs_up$gene, 
+                                        fromType = "SYMBOL",
+                                        toType = c("ENSEMBL", "ENTREZID"),
+                                        OrgDb = "org.Mm.eg.db")
+GO.CB.F.Excitatory.degs_up <- enrichGO(transID.CB.F.Excitatory.degs_up$ENTREZID, 
+                                       "org.Mm.eg.db", 
+                                       keyType = "ENTREZID", 
+                                       ont = "ALL", 
+                                       pvalueCutoff = 0.05, 
+                                       pAdjustMethod = "BH", 
+                                       qvalueCutoff = 0.1)
+GO.CB.F.Excitatory.degs_up <- setReadable(GO.CB.F.Excitatory.degs_up, OrgDb = "org.Mm.eg.db")
+GO.CB.F.Excitatory.degs_up <- subset(GO.CB.F.Excitatory.degs_up, GO.CB.F.Excitatory.degs_up$Count > 2)
+
+write.csv(GO.CB.F.Excitatory.degs_up,
+          file = "GO_terms_CB.F.Excitatory.degs_up(Mdk.FAD_vs_FAD).csv",
+          row.names = FALSE)
+
+# Up-regulated genes in Inhibitory neurons
+CB.F.Inhibitory.degs_up <- subset(CB.F.Inhibitory.degs, 
+                                  CB.F.Inhibitory.degs$avg_log2FC > 0.263 & CB.F.Inhibitory.degs$p_val_adj < 0.05)
+transID.CB.F.Inhibitory.degs_up <- bitr(CB.F.Inhibitory.degs_up$gene, 
+                                        fromType = "SYMBOL",
+                                        toType = c("ENSEMBL", "ENTREZID"),
+                                        OrgDb = "org.Mm.eg.db")
+GO.CB.F.Inhibitory.degs_up <- enrichGO(transID.CB.F.Inhibitory.degs_up$ENTREZID, 
+                                       "org.Mm.eg.db", 
+                                       keyType = "ENTREZID", 
+                                       ont = "ALL", 
+                                       pvalueCutoff = 0.05, 
+                                       pAdjustMethod = "BH", 
+                                       qvalueCutoff = 0.1)
+GO.CB.F.Inhibitory.degs_up <- setReadable(GO.CB.F.Inhibitory.degs_up, OrgDb = "org.Mm.eg.db")
+GO.CB.F.Inhibitory.degs_up <- subset(GO.CB.F.Inhibitory.degs_up, GO.CB.F.Inhibitory.degs_up$Count > 2)
+
+write.csv(GO.CB.F.Inhibitory.degs_up,
+          file = "GO_terms_CB.F.Inhibitory.degs_up(Mdk.FAD_vs_FAD).csv",
+          row.names = FALSE)
+
+# ===== 16. Visualize GO enrichment results =====
+# Biological Process terms for up-regulated genes
+Excitatory_BP_to_plot <- readxl::read_xlsx('Excitatory_BP_to_plot.xlsx')
+ggplot(data=Excitatory_BP_to_plot, aes(y=sort(Description), x=Count)) +
+  geom_point(aes(color=-log10(pvalue),size=Count),alpha=1)+
+  theme_bw() +
+  scale_size_continuous(range=c(3,6), breaks=c(10,20),limits = c(0,20)) +
+  scale_y_discrete(labels=Excitatory_BP_to_plot$Description) +
+  scale_x_continuous(breaks = seq(from = 0, to =20,by = 10),limits = c(0,20)) +
+  theme(axis.text=element_text(face = "plain", color= "black",size = 12)) +
+  scale_color_gradientn(colours =rainbow(8)) +
+  panel_border(size = 1,color = "black" )+
+  xlab("Gene count")+ 
+  ylab(" ") +
+  theme(text=element_text(family="serif"))+
+  labs(title = "Excitatory neuron: 5xFAD; Mdk-/- vs. 5xFAD (female)")
+
+
+Inhibitory_BP_to_plot <- readxl::read_xlsx('Inhibitory_BP_to_plot.xlsx')
+ggplot(data=Inhibitory_BP_to_plot, aes(y=sort(Description), x=Count)) +
+  geom_point(aes(color=-log10(pvalue),size=Count),alpha=1)+
+  theme_bw() +
+  scale_size_continuous(range=c(3,6), breaks=c(10,20),limits = c(0,20)) +
+  scale_y_discrete(labels=Excitatory_BP_to_plot$Description) +
+  scale_x_continuous(breaks = seq(from = 0, to =20,by = 10),limits = c(0,20)) +
+  theme(axis.text=element_text(face = "plain", color= "black",size = 12)) +
+  scale_color_gradientn(colours =rainbow(8)) +
+  panel_border(size = 1,color = "black" )+
+  xlab("Gene count")+ 
+  ylab(" ") +
+  theme(text=element_text(family="serif"))+
+  labs(title = "Inhibitory neuron: 5xFAD; Mdk-/- vs. 5xFAD (female)")
+
+
+
+
